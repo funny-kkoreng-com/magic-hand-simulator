@@ -22,9 +22,20 @@ export interface HandAnalysis {
   tipsCloser: number;
   /** 네 손끝이 손가락 뿌리 대비 손목에서 얼마나 먼지 평균. 작을수록 손바닥 안으로 깊이 말림 (주먹 < 0.92, 고양이 손 ≥ 1.0) */
   curl: number;
+  /** 검지와 중지를 꼬았는지 (무량공처 결인) */
+  crossed: boolean;
+  /** 검지 끝과 중지 끝 사이 거리 (손 크기 대비) */
+  tipGap: number;
+  /** 검지·중지 끝의 좌우 순서가 뿌리 쪽과 뒤바뀌었는지 */
+  tipsSwapped: boolean;
+  /** 검지·중지 벌어짐 (손끝 간격 / 둘째 마디 간격). 브이 ≥ 1.4, 꼬기 < 0.85 */
+  spread: number;
 }
 
 const CAT_CURL = 1.0;
+/** 검지·중지 벌어짐이 이보다 작으면 꼰 손가락, V_SPREAD 이상이면 브이, 사이는 애매함 */
+const CROSS_SPREAD = 0.85;
+const V_SPREAD = 1.4;
 const FIST_CURL = 0.92;
 
 /**
@@ -54,11 +65,25 @@ export function analyzeHand(lm: P[]): HandAnalysis {
   const tipsCloser = [5, 9, 13, 17].reduce((sum, mcp) => sum + (lm[mcp].z - lm[mcp + 3].z), 0) / 4 / size;
   const curl = [5, 9, 13, 17].reduce((sum, mcp) => sum + dist3(wrist, lm[mcp + 3]) / (dist3(wrist, lm[mcp]) || 1), 0) / 4;
 
-  const analysis = { fingers, thumbOut, tipsCloser, curl };
-  return { gesture: pickGesture(lm, analysis, size), ...analysis };
+  // 손가락 꼬기 (무량공처): 검지·중지를 들고 두 손끝이 교차했거나 거의 붙어 있음, 약지·새끼는 펴지 않음.
+  // MediaPipe는 꼰 손가락을 나란히 붙은 것처럼 추정하는 경우가 많아서, 붙어 있기만 해도 인정한다
+  const [, , r, pk] = fingers;
+  const raised = (mcp: number) => dist3(wrist, lm[mcp + 3]) > dist3(wrist, lm[mcp]) * 1.3;
+  const tipGap = dist(lm[8], lm[12]) / size;
+  const tipsSwapped = (lm[8].x - lm[12].x) * (lm[5].x - lm[9].x) + (lm[8].y - lm[12].y) * (lm[5].y - lm[9].y) < 0;
+  // 벌어짐: 손끝 간격 / 둘째 마디 간격. 브이는 손끝으로 갈수록 벌어지고(크다), 꼰 손가락은 모인다(작다)
+  const spread = dist(lm[8], lm[12]) / (dist(lm[6], lm[10]) || 1);
+  // 너무 쉽게 잡히지 않도록: 검지·중지는 확실히 들고, 약지·새끼는 확실히 접고, 엄지도 접고,
+  // 손끝이 실제로 교차했거나 손끝으로 갈수록 확실히 모여야 함 (그냥 붙인 손가락은 제외)
+  const crossed =
+    raised(5) && raised(9) && r === "folded" && pk === "folded" && !thumbOut && (tipsSwapped || spread < CROSS_SPREAD);
+
+  const analysis = { fingers, thumbOut, tipsCloser, curl, crossed, tipGap, tipsSwapped, spread };
+  // 꼰 손가락은 ✌️ 브이로 잡히지 않게 기본 마법에서 제외 (궁극기에서 따로 씀)
+  return { gesture: crossed ? null : pickGesture(lm, analysis, size), ...analysis };
 }
 
-function pickGesture(lm: P[], { fingers, thumbOut, tipsCloser, curl }: Omit<HandAnalysis, "gesture">, size: number): SpellId | null {
+function pickGesture(lm: P[], { fingers, thumbOut, tipsCloser, curl, spread }: Pick<HandAnalysis, "fingers" | "thumbOut" | "tipsCloser" | "curl" | "spread">, size: number): SpellId | null {
   const is = (...want: FingerState[]) => fingers.every((f, i) => f === want[i]);
   const [i, m, r, pk] = fingers;
 
@@ -70,7 +95,8 @@ function pickGesture(lm: P[], { fingers, thumbOut, tipsCloser, curl }: Omit<Hand
     const thumbAway = thumbOut || dist(lm[4], lm[5]) > size * 0.6;
     return thumbAway ? "Call_Me" : null;
   }
-  if (is("out", "out", "folded", "folded")) return thumbOut ? null : "Victory";
+  // 브이는 두 손가락을 확실히 벌렸을 때만 (붙이거나 꼰 손가락과 구분)
+  if (is("out", "out", "folded", "folded")) return thumbOut || spread < V_SPREAD ? null : "Victory";
   if (is("folded", "out", "folded", "folded")) return thumbOut ? null : "Middle_Finger";
   if (is("out", "folded", "folded", "folded")) {
     if (thumbOut) return null;

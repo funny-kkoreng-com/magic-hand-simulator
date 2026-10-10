@@ -1,5 +1,6 @@
 import type { SpellId } from "./spells";
 import type { UltimateId } from "./ultimates";
+import { VOID_CUES } from "./voidVoice";
 
 export interface Vec {
   x: number;
@@ -17,7 +18,7 @@ export interface HandState {
   size: number;
 }
 
-type Shape = "glow" | "star" | "heart" | "flake" | "plus" | "emoji";
+type Shape = "glow" | "star" | "heart" | "flake" | "plus" | "emoji" | "streak" | "glyph";
 
 interface Particle {
   x: number;
@@ -88,6 +89,29 @@ function glowSprite(color: string) {
   return c;
 }
 
+const glyphCache = new Map<string, HTMLCanvasElement>();
+/** 빛나는 글자 (무량공처의 무한한 정보) */
+function glyphSprite(ch: string, color: string) {
+  const key = ch + color;
+  let c = glyphCache.get(key);
+  if (c) return c;
+  c = document.createElement("canvas");
+  c.width = c.height = 64;
+  const g = c.getContext("2d")!;
+  g.font = 'bold 40px "Hiragino Mincho ProN", "Noto Serif CJK JP", "Apple SD Gothic Neo", serif';
+  g.textAlign = "center";
+  g.textBaseline = "middle";
+  g.shadowColor = color;
+  g.shadowBlur = 12;
+  g.fillStyle = "#ffffff";
+  g.fillText(ch, 32, 34);
+  g.fillText(ch, 32, 34);
+  glyphCache.set(key, c);
+  return c;
+}
+
+const VOID_GLYPHS = ["無", "量", "空", "処", "∞", "π", "∑", "∂", "λ", "0", "1", "Ω", "∫"];
+
 const emojiCache = new Map<string, HTMLCanvasElement>();
 function emojiSprite(emoji: string) {
   let c = emojiCache.get(emoji);
@@ -132,6 +156,11 @@ export class MagicEngine {
   private time = 0;
   private strikeTimer = 0;
   private meteorTimer = 0;
+  private voidStars: { a: number; r: number; size: number; tw: number }[] = [];
+  private voidOrigin: Vec | null = null;
+  private voidRingTimer = 0;
+  private voidFlashed = false;
+  private voidPrevT = -1;
   /** 화면 흔들림 / 섬광 세기 (0~1). 컴포넌트가 읽어서 화면에 반영 */
   shake = 0;
   flash = 0;
@@ -580,6 +609,25 @@ export class MagicEngine {
         case "plus":
           drawShape(ctx, p, plusPath);
           break;
+        case "streak": {
+          ctx.strokeStyle = p.color;
+          ctx.lineWidth = p.size;
+          ctx.lineCap = "round";
+          ctx.beginPath();
+          ctx.moveTo(p.x - p.vx * 0.05, p.y - p.vy * 0.05);
+          ctx.lineTo(p.x, p.y);
+          ctx.stroke();
+          break;
+        }
+        case "glyph": {
+          const sz = p.size * (1 + (1 - t) * 0.6);
+          ctx.save();
+          ctx.translate(p.x, p.y);
+          ctx.rotate(p.rot);
+          ctx.drawImage(glyphSprite(p.emoji ?? "∞", p.color), -sz, -sz, sz * 2, sz * 2);
+          ctx.restore();
+          break;
+        }
         case "emoji": {
           ctx.globalCompositeOperation = "source-over";
           ctx.globalAlpha = Math.min(1, t * 2.5);
@@ -627,6 +675,83 @@ export class MagicEngine {
   ultimate(id: UltimateId, stage: UltStage, c: Vec, size: number, p: number, t: number, dt: number, w: number, h: number) {
     const k = Math.min(dt * 60, 3);
     const far = Math.hypot(w, h) * 0.6;
+
+    if (id === "infinite_void") {
+      if (stage === "charge") {
+        // 손으로 빛이 빨려 들어간다
+        for (let i = 0; i < Math.round((2 + p * 6) * k); i++) {
+          this.emit({
+            x: c.x,
+            y: c.y,
+            size: rand(2, 6),
+            color: pick(["#ffffff", "#b9d8ff", "#b18cff"]),
+            max: rand(0.6, 1),
+            orbit: { cx: c.x, cy: c.y, angle: rand(0, Math.PI * 2), radius: rand(size * 1.2, size * 3), speed: rand(3, 6) },
+          });
+        }
+        return;
+      }
+      if (t > 5.8) return;
+      const ringR = size * 0.2;
+      // 원에서 충격파가 주기적으로 퍼진다
+      this.voidRingTimer -= dt;
+      if (this.voidRingTimer <= 0 && t > 0.8) {
+        this.voidRingTimer = 0.9;
+        this.rings.push({ x: c.x, y: c.y, r: ringR, vr: ringR * 3, life: 1.1, max: 1.1, color: "#d9e6ff" });
+      }
+      // 원 주위로 빛 입자가 소용돌이치며 빨려 들어간다 (나선 은하)
+      if (t > 0.5) {
+        for (let i = 0; i < Math.round(4 * k); i++) {
+          this.emit({
+            x: c.x,
+            y: c.y,
+            size: rand(1.5, 4.5),
+            color: pick(["#ffffff", "#b9d8ff", "#c7a6ff", "#8fe8ff"]),
+            max: rand(1, 1.6),
+            orbit: { cx: c.x, cy: c.y, angle: rand(0, Math.PI * 2), radius: rand(ringR * 1.4, ringR * 3.2), speed: rand(1, 1.8) },
+          });
+        }
+      }
+      // 원 가장자리에서 무한한 정보(글자)가 쏟아진다
+      if (t > 0.6) {
+        for (let i = 0; i < Math.round(2.5 * k); i++) {
+          const a = rand(0, Math.PI * 2);
+          const sp = rand(90, 260);
+          this.emit({
+            x: c.x + Math.cos(a) * ringR * 1.05,
+            y: c.y + Math.sin(a) * ringR * 1.05,
+            vx: Math.cos(a) * sp,
+            vy: Math.sin(a) * sp,
+            drag: 1.015,
+            size: rand(9, 22),
+            color: pick(["#b9d8ff", "#c7a6ff", "#ffffff", "#8fe8ff"]),
+            shape: "glyph",
+            emoji: pick(VOID_GLYPHS),
+            rot: rand(-0.3, 0.3),
+            vr: rand(-0.8, 0.8),
+            max: rand(1.2, 2.2),
+          });
+        }
+      }
+      // 워프: 화면 중심에서 빛줄기가 사방으로 쏟아진다
+      for (let i = 0; i < Math.round(6 * k); i++) {
+        const a = rand(0, Math.PI * 2);
+        const r = rand(10, far * 0.15);
+        const sp = rand(80, 220);
+        this.emit({
+          x: c.x + Math.cos(a) * r,
+          y: c.y + Math.sin(a) * r,
+          vx: Math.cos(a) * sp,
+          vy: Math.sin(a) * sp,
+          drag: 1.045,
+          size: rand(1, 2.8),
+          color: pick(["#ffffff", "#ffffff", "#b9d8ff", "#c7a6ff"]),
+          shape: "streak",
+          max: rand(0.9, 1.5),
+        });
+      }
+      return;
+    }
 
     if (id === "blackhole") {
       const n = stage === "charge" ? 2 + p * 6 : 14;
@@ -730,11 +855,255 @@ export class MagicEngine {
     }
   }
 
-  /** 궁극기 중심부 (파티클 위에 즉시 그림) */
-  drawUltimate(ctx: CanvasRenderingContext2D, id: UltimateId, stage: UltStage, c: Vec, size: number, p: number, t: number) {
-    const fade = stage === "release" ? Math.min(1, Math.max(0, (3.8 - t) / 0.6)) : 1;
+  /**
+   * 파티클 아래에 깔리는 궁극기 배경 (무량공처의 우주 공간).
+   * origin = 시전한 손 위치. 어둠이 거기서부터 원형으로 퍼져 화면을 덮는다
+   */
+  drawBackdrop(ctx: CanvasRenderingContext2D, id: UltimateId, stage: UltStage, t: number, w: number, h: number, dur: number, origin: Vec) {
+    if (id !== "infinite_void" || stage !== "release") {
+      this.voidOrigin = null;
+      this.voidFlashed = false;
+      this.voidPrevT = -1;
+      return;
+    }
+    this.voidOrigin ??= { ...origin };
+    const o = this.voidOrigin;
+    const alpha = Math.min(1, Math.max(0, (dur - t) / 0.8));
+    const cx = w / 2;
+    const cy = h / 2;
+    const R = Math.hypot(w, h) / 2;
+
+    // 영역 확장: 손에서부터 원형으로 퍼짐
+    const reach = Math.max(Math.hypot(o.x, o.y), Math.hypot(w - o.x, o.y), Math.hypot(o.x, h - o.y), Math.hypot(w - o.x, h - o.y));
+    const expand = 1 - Math.pow(1 - Math.min(1, t / 0.7), 3);
+    const rExp = reach * 1.02 * expand;
+
     ctx.save();
-    if (id === "blackhole") {
+    ctx.beginPath();
+    ctx.arc(o.x, o.y, Math.max(1, rExp), 0, Math.PI * 2);
+    ctx.clip();
+    ctx.globalAlpha = alpha;
+    const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, R);
+    g.addColorStop(0, "rgba(10,6,40,0.97)");
+    g.addColorStop(0.35, "rgba(30,16,90,0.92)");
+    g.addColorStop(0.7, "rgba(14,8,50,0.95)");
+    g.addColorStop(1, "rgba(0,0,0,0.98)");
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, w, h);
+
+    ctx.globalCompositeOperation = "lighter";
+    // 성운
+    const nebula = ["#5a3dff", "#2f7bff", "#b14dff", "#3dd6ff"];
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * Math.PI * 2 + t * 0.08;
+      const r = R * (0.45 + 0.15 * Math.sin(i * 2.1 + t * 0.5));
+      const s = R * 0.6;
+      ctx.globalAlpha = alpha * 0.3;
+      ctx.drawImage(glowSprite(nebula[i % nebula.length]), cx + Math.cos(a) * r - s, cy + Math.sin(a) * r - s, s * 2, s * 2);
+    }
+
+    // 원 뒤에서 뻗는 빛줄기 (후광)
+    const rays = ctx.createRadialGradient(cx, cy, Math.min(w, h) * 0.18, cx, cy, R * 1.1);
+    rays.addColorStop(0, "rgba(220,235,255,0.55)");
+    rays.addColorStop(0.4, "rgba(170,150,255,0.18)");
+    rays.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = rays;
+    ctx.globalAlpha = alpha * Math.min(1, Math.max(0, (t - 0.5) / 0.8));
+    ctx.beginPath();
+    const beams = 20;
+    for (let i = 0; i < beams; i++) {
+      const a = (i / beams) * Math.PI * 2 + t * 0.12;
+      const wd = 0.035 + 0.025 * Math.sin(i * 3.7 + t * 2);
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(cx + Math.cos(a - wd) * R * 1.2, cy + Math.sin(a - wd) * R * 1.2);
+      ctx.lineTo(cx + Math.cos(a + wd) * R * 1.2, cy + Math.sin(a + wd) * R * 1.2);
+      ctx.closePath();
+    }
+    ctx.fill();
+
+    // 별: 바깥으로 날아가는 워프
+    if (this.voidStars.length === 0) {
+      for (let i = 0; i < 280; i++) {
+        this.voidStars.push({ a: rand(0, Math.PI * 2), r: Math.random(), size: rand(0.6, 2.4), tw: rand(0, Math.PI * 2) });
+      }
+    }
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineCap = "round";
+    for (const st of this.voidStars) {
+      const rr = (st.r + t * (0.12 + st.size * 0.06)) % 1;
+      const d1 = R * (0.08 + rr * rr);
+      const d0 = d1 * 0.9;
+      const ca = Math.cos(st.a);
+      const sa = Math.sin(st.a);
+      ctx.globalAlpha = alpha * Math.min(1, rr * 3) * (0.6 + 0.4 * Math.sin(this.time * 4 + st.tw));
+      ctx.lineWidth = st.size * (0.4 + rr * 1.4);
+      ctx.beginPath();
+      ctx.moveTo(cx + ca * d0, cy + sa * d0);
+      ctx.lineTo(cx + ca * d1, cy + sa * d1);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // 퍼지는 경계의 흰 빛
+    if (t < 0.9) {
+      ctx.save();
+      ctx.globalCompositeOperation = "lighter";
+      ctx.globalAlpha = 1 - t / 0.9;
+      ctx.strokeStyle = "#ffffff";
+      ctx.shadowColor = "#b9d8ff";
+      ctx.shadowBlur = 30;
+      ctx.lineWidth = 8;
+      ctx.beginPath();
+      ctx.arc(o.x, o.y, Math.max(1, rExp), 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  /** 궁극기 중심부 (파티클 위에 즉시 그림). dur = 발동 지속 시간(초) */
+  drawUltimate(ctx: CanvasRenderingContext2D, id: UltimateId, stage: UltStage, c: Vec, size: number, p: number, t: number, dur = 3.8, w = 0, h = 0) {
+    const fade = stage === "release" ? Math.min(1, Math.max(0, (dur - t) / 0.6)) : 1;
+    ctx.save();
+    if (id === "infinite_void") {
+      if (stage === "charge") {
+        // 손에 작은 검은 구체가 맺히고 빛 고리가 돈다
+        const r = size * (0.12 + p * 0.25);
+        ctx.globalCompositeOperation = "lighter";
+        ctx.globalAlpha = 0.9;
+        const halo = r * 4;
+        ctx.drawImage(glowSprite("#b9d8ff"), c.x - halo, c.y - halo, halo * 2, halo * 2);
+        ctx.globalCompositeOperation = "source-over";
+        ctx.fillStyle = "#000";
+        ctx.beginPath();
+        ctx.arc(c.x, c.y, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = "#fff";
+        ctx.lineWidth = Math.max(1.5, r * 0.12);
+        ctx.stroke();
+        ctx.globalCompositeOperation = "lighter";
+        ctx.strokeStyle = "rgba(185,216,255,0.9)";
+        ctx.lineWidth = 2;
+        ctx.setLineDash([r * 0.5, r * 0.35]);
+        ctx.lineDashOffset = -this.time * r * 3;
+        ctx.beginPath();
+        ctx.arc(c.x, c.y, r * (1.8 + p * 0.6), 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      } else {
+        // 흰 빛 테두리를 두른 거대한 검은 원 (size = 화면 짧은 변). 끝날 땐 한 점으로 수축
+        const open = 1 - Math.pow(1 - Math.min(1, Math.max(0, (t - 0.3) / 0.9)), 3);
+        const close = Math.min(1, Math.max(0, (dur - 0.15 - t) / 0.6));
+        const R = size * 0.2 * open * close * close * (1 + Math.sin(this.time * 2) * 0.015);
+        if (t > dur - 0.3 && !this.voidFlashed) {
+          this.voidFlashed = true;
+          this.flash = 1;
+          this.flashColor = "#ffffff";
+        }
+        if (R > 0.5) {
+          ctx.globalCompositeOperation = "lighter";
+          const halo = R * 2.8;
+          ctx.globalAlpha = 0.9;
+          ctx.drawImage(glowSprite("#8fb8ff"), c.x - halo, c.y - halo, halo * 2, halo * 2);
+          // 가로 렌즈 플레어 + 빛 번짐 잔상
+          if (w) {
+            ctx.globalAlpha = 0.55 * open * close;
+            ctx.drawImage(glowSprite("#6fa8ff"), 0, c.y - R * 0.09, w, R * 0.18);
+            ctx.globalAlpha = 0.7 * open * close;
+            ctx.drawImage(glowSprite("#ffffff"), c.x - w * 0.3, c.y - R * 0.03, w * 0.6, R * 0.06);
+            const ghosts: [number, number, string][] = [
+              [0.45, 0.18, "#7f9cff"],
+              [0.8, 0.1, "#c78cff"],
+              [1.25, 0.25, "#6fe0ff"],
+              [1.6, 0.07, "#ffffff"],
+            ];
+            for (const [d, sz, col] of ghosts) {
+              const gx = c.x + (w * 0.85 - c.x) * d * 0.6;
+              const gy = c.y + (h * 0.12 - c.y) * d * 0.6;
+              const gs = R * sz * 2;
+              ctx.globalAlpha = 0.22 * open * close;
+              ctx.drawImage(glowSprite(col), gx - gs, gy - gs, gs * 2, gs * 2);
+            }
+            ctx.globalAlpha = 1;
+          }
+          ctx.globalCompositeOperation = "source-over";
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = "#000";
+          ctx.beginPath();
+          ctx.arc(c.x, c.y, R, 0, Math.PI * 2);
+          ctx.fill();
+          // 색수차 테두리 (빨강·파랑 번짐)
+          ctx.globalCompositeOperation = "lighter";
+          ctx.lineWidth = Math.max(2, R * 0.05);
+          for (const [dx, col] of [
+            [-R * 0.018, "rgba(255,60,140,0.7)"],
+            [R * 0.018, "rgba(60,200,255,0.7)"],
+          ] as const) {
+            ctx.strokeStyle = col;
+            ctx.beginPath();
+            ctx.arc(c.x + dx, c.y, R * 1.01, 0, Math.PI * 2);
+            ctx.stroke();
+          }
+          ctx.globalCompositeOperation = "source-over";
+          ctx.beginPath();
+          ctx.arc(c.x, c.y, R, 0, Math.PI * 2);
+          ctx.shadowColor = "#ffffff";
+          ctx.shadowBlur = R * 0.4;
+          ctx.strokeStyle = "#ffffff";
+          ctx.lineWidth = Math.max(2, R * 0.075);
+          ctx.stroke();
+          ctx.shadowBlur = 0;
+          // 테두리를 따라 도는 빛
+          ctx.globalCompositeOperation = "lighter";
+          for (let i = 0; i < 3; i++) {
+            const a = this.time * (1.2 + i * 0.4) + (i * Math.PI * 2) / 3;
+            const s = R * 0.35;
+            ctx.drawImage(glowSprite("#ffffff"), c.x + Math.cos(a) * R - s, c.y + Math.sin(a) * R - s, s * 2, s * 2);
+          }
+          ctx.strokeStyle = "rgba(190,170,255,0.8)";
+          ctx.lineWidth = Math.max(1, R * 0.02);
+          ctx.beginPath();
+          ctx.arc(c.x, c.y, R * 1.13, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+        // 한자가 찍힐 때마다 쿵: 흔들림 + 섬광 + 충격파
+        for (const cue of [...VOID_CUES.ryoiki, ...VOID_CUES.muryo]) {
+          if (this.voidPrevT < cue && t >= cue) {
+            const big = VOID_CUES.muryo.includes(cue);
+            this.shake = Math.min(1, this.shake + (big ? 0.55 : 0.3));
+            this.flash = Math.max(this.flash, big ? 0.35 : 0.18);
+            this.flashColor = "#cfe0ff";
+            this.rings.push({ x: c.x, y: c.y, r: size * 0.2, vr: size * (big ? 1.6 : 1), life: 0.6, max: 0.6, color: "#ffffff" });
+          }
+        }
+        this.voidPrevT = t;
+
+        // 비네트
+        if (w && h) {
+          ctx.globalCompositeOperation = "source-over";
+          const vg = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.35, w / 2, h / 2, Math.hypot(w, h) * 0.6);
+          vg.addColorStop(0, "rgba(0,0,0,0)");
+          vg.addColorStop(1, `rgba(0,0,0,${0.7 * fade})`);
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = vg;
+          ctx.fillRect(0, 0, w, h);
+        }
+
+        // 시네마틱 레터박스
+        if (w && h) {
+          ctx.globalCompositeOperation = "source-over";
+          ctx.globalAlpha = 1;
+          const bar = h * 0.09 * Math.min(1, t / 0.5) * Math.min(1, Math.max(0, (dur - t) / 0.5));
+          ctx.fillStyle = "#000";
+          ctx.fillRect(0, 0, w, bar);
+          ctx.fillRect(0, h - bar, w, bar);
+          // 음성에 맞춰 한 글자씩: 위 領域展開, 아래 無量空処
+          const textFade = Math.min(1, Math.max(0, (dur - 0.3 - t) / 0.5));
+          const unit = Math.min(w, h);
+          drawKanjiLine(ctx, "領域展開", VOID_CUES.ryoiki, t, w / 2, h * 0.17, unit * 0.075, textFade);
+          drawKanjiLine(ctx, "無量空処", VOID_CUES.muryo, t, w / 2, h * 0.84, unit * 0.13, textFade);
+        }
+      }
+    } else if (id === "blackhole") {
       const r = stage === "charge" ? size * (0.15 + p * 0.35) : size * (0.5 + Math.min(t, 1) * 1.3) * fade;
       ctx.globalCompositeOperation = "lighter";
       ctx.globalAlpha = 0.9;
@@ -853,6 +1222,46 @@ function drawCatPaw(ctx: CanvasRenderingContext2D, hand: HandState, time: number
   ctx.beginPath();
   ctx.ellipse(-s * 0.15, -s * 0.1, s * 0.09, s * 0.05, -0.5, 0, Math.PI * 2);
   ctx.fill();
+  ctx.restore();
+}
+
+/** 한 글자씩 "쾅" 하고 찍히는 한자 줄. cues = 글자별 등장 시각(초) */
+function drawKanjiLine(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  cues: number[],
+  t: number,
+  cx: number,
+  cy: number,
+  size: number,
+  fade: number,
+) {
+  const chars = [...text];
+  const gap = size * 1.12;
+  ctx.save();
+  ctx.font = `900 ${size}px "Hiragino Mincho ProN", "Yu Mincho", "Noto Serif CJK JP", serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  chars.forEach((ch, i) => {
+    const since = t - cues[i];
+    if (since < 0) return;
+    const pop = Math.min(1, since / 0.18);
+    const scale = 1 + (1 - pop) * 0.9;
+    const x = cx + (i - (chars.length - 1) / 2) * gap;
+    ctx.save();
+    ctx.translate(x, cy);
+    ctx.scale(scale, scale);
+    ctx.globalAlpha = pop * fade;
+    ctx.shadowColor = "#9fc4ff";
+    ctx.shadowBlur = size * (0.25 + (1 - pop) * 0.8);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillText(ch, 0, 0);
+    ctx.shadowBlur = 0;
+    ctx.lineWidth = Math.max(1, size * 0.02);
+    ctx.strokeStyle = "rgba(20,10,60,0.8)";
+    ctx.strokeText(ch, 0, 0);
+    ctx.restore();
+  });
   ctx.restore();
 }
 

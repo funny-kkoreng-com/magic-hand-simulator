@@ -1,7 +1,7 @@
 import type { HandState } from "./magicEngine";
 import { SPELL_MAP, type SpellId } from "./spells";
 
-export type UltimateId = "blackhole" | "thunder" | "meteor";
+export type UltimateId = "blackhole" | "thunder" | "meteor" | "infinite_void";
 
 export interface Ultimate {
   id: UltimateId;
@@ -9,22 +9,33 @@ export interface Ultimate {
   icon: string;
   color: string;
   description: string;
-  /** 결인 순서. 각 인은 두 손의 손동작 쌍 (좌우 구분 없음) */
+  /** 결인 순서. 각 인은 두 손의 손동작 쌍 (좌우 구분 없음). 비어 있으면 결인 없이 마지막 자세만으로 발동 */
   seals: [SpellId, SpellId][];
+  /** 한 손으로 쓰는 궁극기 (결인 없이 바로 차징) */
+  oneHand?: boolean;
+  /** 컷인 위에 작게 뜨는 부제 */
+  subtitle?: string;
+  chargeMs?: number;
+  releaseMs?: number;
   /** 마지막 자세 설명 */
   finalStep: string;
   /** 차징이 끝난 뒤 손을 카메라 쪽으로 밀어야 발동 */
   push?: boolean;
   /** 차징 중 유지해야 하는 마지막 자세 */
-  finalCheck: (hands: TwoHands) => boolean;
+  finalCheck: (hands: SeenHand[]) => boolean;
 }
 
 export interface SeenHand {
   gesture: SpellId | null;
   hand: HandState;
+  /** 검지와 중지를 꼬았는지 (무량공처 결인) */
+  crossed: boolean;
 }
 
 type TwoHands = [SeenHand, SeenHand];
+
+const withTwo = (check: (h: TwoHands) => boolean) => (hands: SeenHand[]) =>
+  hands.length >= 2 && check([hands[0], hands[1]]);
 
 const palmDistance = ([a, b]: TwoHands) =>
   Math.hypot(a.hand.palm.x - b.hand.palm.x, a.hand.palm.y - b.hand.palm.y) / ((a.hand.size + b.hand.size) / 2);
@@ -45,7 +56,7 @@ export const ULTIMATES: Ultimate[] = [
       ["Victory", "Victory"],
     ],
     finalStep: "두 손바닥을 펴서 공을 감싸듯 가까이 모으고 유지",
-    finalCheck: (h) => both(h, "Open_Palm", "Open_Palm") && palmDistance(h) < 2.2,
+    finalCheck: withTwo((h) => both(h, "Open_Palm", "Open_Palm") && palmDistance(h) < 2.2),
   },
   {
     id: "thunder",
@@ -60,7 +71,7 @@ export const ULTIMATES: Ultimate[] = [
       ["Closed_Fist", "Closed_Fist"],
     ],
     finalStep: "두 손 모두 검지를 하늘로 치켜들고 유지",
-    finalCheck: (h) => both(h, "Pointing_Up", "Pointing_Up"),
+    finalCheck: withTwo((h) => both(h, "Pointing_Up", "Pointing_Up")),
   },
   {
     id: "meteor",
@@ -76,7 +87,21 @@ export const ULTIMATES: Ultimate[] = [
     ],
     finalStep: "두 손바닥을 펴서 유지하다가, 게이지가 차면 카메라 쪽으로 쭉 밀기",
     push: true,
-    finalCheck: (h) => both(h, "Open_Palm", "Open_Palm"),
+    finalCheck: withTwo((h) => both(h, "Open_Palm", "Open_Palm")),
+  },
+  {
+    id: "infinite_void",
+    name: "영역전개 · 무량공처",
+    subtitle: "領域展開 · 無量空処",
+    icon: "♾️",
+    color: "#b9d8ff",
+    description: "끝없는 정보가 쏟아지는 무한의 공간을 펼칩니다.",
+    seals: [],
+    oneHand: true,
+    finalStep: "한 손을 들어 검지와 중지를 확실히 꼬고(교차), 엄지·약지·새끼는 접은 채 유지",
+    chargeMs: 2500,
+    releaseMs: 6500,
+    finalCheck: (hands) => hands.some((h) => h.crossed),
   },
 ];
 
@@ -92,6 +117,8 @@ export const sealLabel = ([a, b]: [SpellId, SpellId]) =>
 export const ULT_RULES = {
   /** 한 인으로 인정받으려면 유지해야 하는 시간 */
   sealHoldMs: 300,
+  /** 한 손 궁극기(무량공처) 결인을 이만큼 유지해야 차징이 시작됨 */
+  oneHandHoldMs: 800,
   /** 다음 인까지 허용 시간 */
   sealGapMs: 2000,
   /** 엉뚱한 인을 이만큼 유지하면 실패 (그보다 짧으면 동작 전환 중으로 보고 무시) */
@@ -134,6 +161,7 @@ export class UltimateController {
   phaseStart = 0;
 
   private lastSealAt = 0;
+  private crossedSince = 0;
   private pair: string | null = null;
   private pairSince = 0;
   private recorded: string | null = null;
@@ -154,7 +182,7 @@ export class UltimateController {
   }
 
   private tryStart(key: string, now: number, events: UltEvent[]) {
-    const u = ULTIMATES.find((u) => sealKey(u.seals[0]) === key);
+    const u = ULTIMATES.find((u) => u.seals.length > 0 && sealKey(u.seals[0]) === key);
     if (!u) return;
     this.phase = "sealing";
     this.ult = u;
@@ -176,8 +204,15 @@ export class UltimateController {
       this.size = (two[0].hand.size + two[1].hand.size) / 2;
     }
 
+    // 한 손 궁극기는 그 손을 중심으로
+    const crossedHand = hands.find((h) => h.crossed);
+    if (crossedHand && this.ult?.oneHand) {
+      this.center = { ...crossedHand.hand.palm };
+      this.size = crossedHand.hand.size;
+    }
+
     if (this.phase === "release") {
-      if (now - this.phaseStart >= ULT_RULES.releaseMs) {
+      if (now - this.phaseStart >= (this.ult?.releaseMs ?? ULT_RULES.releaseMs)) {
         this.reset();
         this.phase = "cooldown";
         this.cooldownUntil = now + ULT_RULES.cooldownMs;
@@ -197,7 +232,23 @@ export class UltimateController {
     }
     const held = now - this.pairSince;
 
+    if (!crossedHand) this.crossedSince = 0;
+    else if (!this.crossedSince) this.crossedSince = now;
+
     if (this.phase === "idle") {
+      // 한 손 궁극기: 결인 자세를 잠깐 유지하면 바로 차징 시작
+      const oneHand = ULTIMATES.find((u) => u.oneHand);
+      if (oneHand && crossedHand && now - this.crossedSince >= ULT_RULES.oneHandHoldMs) {
+        this.ult = oneHand;
+        this.center = { ...crossedHand.hand.palm };
+        this.size = crossedHand.hand.size;
+        this.phase = "charging";
+        this.phaseStart = now;
+        this.charge = 0;
+        this.lastOk = now;
+        events.push({ type: "ready" });
+        return events;
+      }
       if (key && key !== this.recorded && held >= ULT_RULES.sealHoldMs) this.tryStart(key, now, events);
       if (!key && held > ULT_RULES.sealGapMs) this.recorded = null;
       return events;
@@ -229,10 +280,10 @@ export class UltimateController {
     }
 
     if (this.phase === "charging") {
-      const ok = two !== null && ult.finalCheck(two);
+      const ok = ult.finalCheck(hands);
       if (ok) {
         this.lastOk = now;
-        this.charge = Math.min(1, this.charge + (dt * 1000) / ULT_RULES.chargeMs);
+        this.charge = Math.min(1, this.charge + (dt * 1000) / (ult.chargeMs ?? ULT_RULES.chargeMs));
       } else if (now - this.lastOk > (this.charge > 0 ? ULT_RULES.chargeGraceMs : ULT_RULES.sealGapMs)) {
         this.fail(events);
         return events;

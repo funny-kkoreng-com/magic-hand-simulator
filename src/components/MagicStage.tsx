@@ -7,6 +7,7 @@ import { analyzeHand, type FingerState, type HandAnalysis } from "@/lib/gestures
 import { SPELL_MAP, type SpellId } from "@/lib/spells";
 import {
   ULTIMATE_MAP,
+  ULT_RULES,
   UltimateController,
   sealIcon,
   type SeenHand,
@@ -14,6 +15,7 @@ import {
   type UltimateView,
 } from "@/lib/ultimates";
 import { composePhoto, drawComposite, fileStamp, outputSize, pickRecordingType, type CompositeOptions } from "@/lib/photo";
+import { VoidVoice } from "@/lib/voidVoice";
 import GestureGuide from "./GestureGuide";
 
 // shine-my-bald와 같은 손 인식 설정
@@ -90,6 +92,7 @@ export default function MagicStage() {
   const showDotsRef = useRef(true);
   const showDebugRef = useRef(false);
   const autoShotRef = useRef(true);
+  const voiceRef = useRef<VoidVoice | null>(null);
   const captureRef = useRef(false);
   const countingRef = useRef(false);
   const photoOpenRef = useRef(false);
@@ -256,7 +259,7 @@ export default function MagicStage() {
       const visible = [...tracked.entries()].filter(([, t]) => t.hand && now - t.lastSeen <= 150);
 
       // 궁극기 (두 손)
-      const seen: SeenHand[] = visible.map(([, t]) => ({ gesture: t.confirmed, hand: t.hand! }));
+      const seen: SeenHand[] = visible.map(([, t]) => ({ gesture: t.confirmed, hand: t.hand!, crossed: !!t.analysis?.crossed }));
       for (const ev of ult.update(now, dt, seen)) {
         if (ev.type === "seal") {
           engine.flash = Math.max(engine.flash, 0.15);
@@ -266,12 +269,14 @@ export default function MagicStage() {
         } else if (ev.type === "ready") {
           setToast({ text: "결인 완료! 마지막 자세를 유지하세요", color: ULTIMATE_MAP[ult.ult!.id].color, key: now });
         } else if (ev.type === "release") {
-          setUltBanner({ id: ev.id, key: now });
+          // 무량공처는 컷인 대신 음성에 맞춰 한자가 한 글자씩 뜬다
+          if (ev.id === "infinite_void") voiceRef.current?.play();
+          else setUltBanner({ id: ev.id, key: now });
           engine.flash = 1;
           engine.flashColor = ULTIMATE_MAP[ev.id].color;
           engine.shake = 1;
           // 궁극기가 제일 화려한 순간 자동 촬영
-          if (autoShotRef.current && !photoOpenRef.current && !recCanvasRef.current) autoCaptureAt = now + 500;
+          if (autoShotRef.current && !photoOpenRef.current && !recCanvasRef.current) autoCaptureAt = now + (ev.id === "infinite_void" ? 3300 : 500);
         }
       }
 
@@ -290,16 +295,25 @@ export default function MagicStage() {
           engine.cast(t.confirmed, t.hand!, dt, key);
         }
       }
+      // 무량공처는 발동하면 화면 한가운데에 펼쳐진다
+      const isVoid = ult.ult?.id === "infinite_void";
+      const fxCenter = isVoid && ultStage === "release" ? { x: cw / 2, y: ch / 2 } : ult.center;
+      const fxSize = isVoid && ultStage === "release" ? Math.min(cw, ch) : ult.size;
+      const ultDur = (ult.ult?.releaseMs ?? ULT_RULES.releaseMs) / 1000;
       if (ultActive && ult.ult) {
-        engine.ultimate(ult.ult.id, ultStage, ult.center, ult.size, ultP, ultT, dt, cw, ch);
+        engine.ultimate(ult.ult.id, ultStage, fxCenter, fxSize, ultP, ultT, dt, cw, ch);
+        engine.drawBackdrop(ctx, ult.ult.id, ultStage, ultT, cw, ch, ultDur, ult.center);
       }
       engine.update(dt);
       engine.draw(ctx);
       if (ultActive && ult.ult) {
-        engine.drawUltimate(ctx, ult.ult.id, ultStage, ult.center, ult.size, ultP, ultT);
+        engine.drawUltimate(ctx, ult.ult.id, ultStage, fxCenter, fxSize, ultP, ultT, ultDur, cw, ch);
       }
 
-      const dark = ult.phase === "release" ? 0.55 : ult.phase === "charging" ? ult.charge * 0.4 : ult.phase === "pushing" ? 0.4 : 0;
+      const releaseDark = isVoid ? 0.8 : 0.55;
+      const chargeDark = isVoid ? 0.6 : 0.4;
+      const dark =
+        ult.phase === "release" ? releaseDark : ult.phase === "charging" ? ult.charge * chargeDark : ult.phase === "pushing" ? 0.4 : 0;
 
       // 사진 / 영상 (손 점·판정 글씨를 그리기 전의 이펙트만 담는다)
       const wantPhoto = captureRef.current || (autoCaptureAt && now >= autoCaptureAt);
@@ -364,9 +378,10 @@ export default function MagicStage() {
           const a = t.analysis;
           if (!a) continue;
           const lines = [
-            `→ ${a.gesture ? SPELL_MAP[a.gesture].gestureName : "인식 안 됨"}`,
+            `→ ${a.crossed ? "손가락 꼬기 (무량공처)" : a.gesture ? SPELL_MAP[a.gesture].gestureName : "인식 안 됨"}`,
             ["검지", "중지", "약지", "새끼"].map((n, i) => `${n}:${FINGER_LABEL[a.fingers[i]]}`).join(" "),
             `엄지:${a.thumbOut ? "폄" : "접음"}  말림:${a.curl.toFixed(2)}  손끝 앞쪽:${a.tipsCloser.toFixed(2)}`,
+            `꼬기 - 교차:${a.tipsSwapped ? "O" : "X"}  간격:${a.tipGap.toFixed(2)}  벌어짐:${a.spread.toFixed(2)}`,
           ];
           const x = t.hand!.palm.x;
           let y = t.hand!.palm.y - t.hand!.size * 1.9;
@@ -384,7 +399,11 @@ export default function MagicStage() {
 
       // 화면 흔들림 / 섬광 / 어둡게
       const sh = engine.shake * 14;
-      shakeRef.current!.style.transform = sh > 0.3 ? `translate(${(Math.random() - 0.5) * sh}px, ${(Math.random() - 0.5) * sh}px)` : "";
+      // 무량공처 중에는 화면이 천천히 앞으로 다가간다
+      const zoom =
+        isVoid && ultStage === "release" ? 1 + 0.07 * Math.min(1, ultT / 3) * Math.min(1, Math.max(0, (ultDur - ultT) / 0.6)) : 1;
+      const shakeT = sh > 0.3 ? `translate(${(Math.random() - 0.5) * sh}px, ${(Math.random() - 0.5) * sh}px)` : "";
+      shakeRef.current!.style.transform = zoom > 1.001 ? `${shakeT} scale(${zoom})` : shakeT;
       flashRef.current!.style.opacity = String(engine.flash * 0.8);
       flashRef.current!.style.background = engine.flashColor;
       darkRef.current!.style.opacity = String(dark);
@@ -414,6 +433,9 @@ export default function MagicStage() {
       return;
     }
     setStatus("loading");
+    // 소리는 사용자 클릭 직후에 준비해야 나중에 자동 재생이 막히지 않는다
+    voiceRef.current ??= new VoidVoice();
+    voiceRef.current.preload();
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { width: { ideal: 640 }, height: { ideal: 480 } },
@@ -454,6 +476,7 @@ export default function MagicStage() {
     return () => {
       cancelAnimationFrame(rafRef.current);
       clearInterval(recTimerRef.current);
+      voiceRef.current?.stop();
       if (recorderRef.current?.state === "recording") recorderRef.current.stop();
       streamRef.current?.getTracks().forEach((t) => t.stop());
       landmarkerRef.current?.close();
@@ -671,7 +694,7 @@ export default function MagicStage() {
             textShadow: `0 0 30px ${bannerUlt.color}, 0 0 6px #000`,
           }}
         >
-          <div className="text-xs font-bold tracking-[0.4em] text-white/80">ULTIMATE</div>
+          <div className="text-xs font-bold tracking-[0.4em] text-white/80">{bannerUlt.subtitle ?? "ULTIMATE"}</div>
           <div className="text-5xl font-black tracking-widest sm:text-7xl">
             {bannerUlt.icon} {bannerUlt.name}
           </div>

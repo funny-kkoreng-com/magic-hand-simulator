@@ -96,9 +96,9 @@ export default function GestureGuide({ open, onClose, activeIds, ultView }: Prop
           })}
         </ol>
 
-        <h3 className="mb-1 mt-6 px-1 text-xs font-bold tracking-widest text-white/50">궁극기 · 두 손</h3>
+        <h3 className="mb-1 mt-6 px-1 text-xs font-bold tracking-widest text-white/50">궁극기</h3>
         <p className="mb-3 px-1 text-xs leading-relaxed text-white/50">
-          두 손으로 인을 순서대로 맺으세요. 각 인은 {ULT_RULES.sealHoldMs / 1000}초 유지, 다음 인까지{" "}
+          두 손 궁극기는 인을 순서대로 맺으세요. 각 인은 {ULT_RULES.sealHoldMs / 1000}초 유지, 다음 인까지{" "}
           {ULT_RULES.sealGapMs / 1000}초 안에! 틀린 인을 맺거나 늦으면 처음부터. 마지막 자세는{" "}
           {ULT_RULES.chargeMs / 1000}초 유지해야 발동하고, 발동 후 {ULT_RULES.cooldownMs / 1000}초 재충전.
         </p>
@@ -119,6 +119,9 @@ export default function GestureGuide({ open, onClose, activeIds, ultView }: Prop
                   <div>
                     <div className="font-black" style={{ color: u.color }}>
                       {u.name}
+                      <span className="ml-2 rounded-full bg-white/10 px-2 py-0.5 align-middle text-[10px] font-semibold text-white/70">
+                        {u.oneHand ? "한 손" : "두 손"}
+                      </span>
                     </div>
                     <div className="text-xs text-white/50">{u.description}</div>
                   </div>
